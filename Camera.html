@@ -8,22 +8,54 @@
 <div class="box" id="selfieBox"><span class="tag">LANGKAH 2 · SELFIE</span><p class="sub">QR berhasil dibaca. Arahkan kamera depan ke wajah siswa dan tekan tombol untuk mengambil selfie.</p><div class="view"><video id="front" autoplay playsinline muted></video></div><button id="captureBtn" onclick="captureAndSend()">Ambil Selfie & Kirim ke SiPeKa</button><button class="alt" onclick="retakeSelfie()">Ulangi Selfie</button><div id="selfieMsg" class="status"></div></div>
 <div class="box"><p class="small">Jika izin kamera ditolak, izinkan kamera untuk domain halaman pemindai HTTPS ini di pengaturan situs Chrome. Jangan menutup tab SiPeKa utama.</p></div><canvas id="canvas"></canvas></div>
 <script>
-let rearStream=null,frontStream=null,token='',stage='scan',raf=0,lastScan=0,locked=false;
+let rearStream=null,frontStream=null,token='',stage='scan',raf=0,lastScan=0,locked=false,nativeQr=null,decodeBusy=false;
 const rear=document.getElementById('rear'),front=document.getElementById('front'),canvas=document.getElementById('canvas'),msg=document.getElementById('msg');
 function errText(e){return (e&&e.name||'Error')+': '+(e&&e.message||String(e))}
 async function stopStream(which){const s=which==='rear'?rearStream:frontStream;if(s)s.getTracks().forEach(t=>t.stop());if(which==='rear'){rearStream=null;rear.srcObject=null}else{frontStream=null;front.srcObject=null}}
 async function openStream(facing){const constraints={audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720}}};try{return await navigator.mediaDevices.getUserMedia(constraints)}catch(e){if(facing==='environment'){return await navigator.mediaDevices.getUserMedia({audio:false,video:true})}throw e}}
-async function init(){try{if(!window.isSecureContext)throw new Error('Halaman kamera harus dibuka lewat HTTPS.');if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Browser tidak menyediakan akses kamera langsung.');if(typeof jsQR!=='function')throw new Error('Pustaka scanner QR gagal dimuat. Periksa koneksi internet.');rearStream=await openStream('environment');rear.srcObject=rearStream;await rear.play();msg.textContent='Kamera aktif. Arahkan QR ke kotak hijau; pemindaian berjalan otomatis.';document.getElementById('restartBtn').style.display='none';stage='scan';scanLoop()}catch(e){msg.textContent='Kamera tidak dapat dibuka.\n'+errText(e)+'\n\nPastikan izin kamera untuk halaman HTTPS ini diizinkan.';document.getElementById('restartBtn').style.display='block'}}
+async function init(){try{if('BarcodeDetector' in window){try{nativeQr=new BarcodeDetector({formats:['qr_code']})}catch(e){nativeQr=null}}if(!window.isSecureContext)throw new Error('Halaman kamera harus dibuka lewat HTTPS.');if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Browser tidak menyediakan akses kamera langsung.');if(typeof jsQR!=='function')throw new Error('Pustaka scanner QR gagal dimuat. Periksa koneksi internet.');rearStream=await openStream('environment');rear.srcObject=rearStream;await rear.play();msg.textContent='Kamera aktif. Arahkan QR ke kotak hijau; pemindaian berjalan otomatis.';document.getElementById('restartBtn').style.display='none';stage='scan';scanLoop()}catch(e){msg.textContent='Kamera tidak dapat dibuka.\n'+errText(e)+'\n\nPastikan izin kamera untuk halaman HTTPS ini diizinkan.';document.getElementById('restartBtn').style.display='block'}}
 function decodeFrame(ctx,w,h){try{const im=ctx.getImageData(0,0,w,h);return jsQR(im.data,w,h,{inversionAttempts:'attemptBoth'})}catch(e){return null}}
-function scanLoop(now){if(stage!=='scan'||locked)return;if(now-lastScan>100){lastScan=now;if(rear.readyState>=2&&rear.videoWidth>0){const vw=rear.videoWidth,vh=rear.videoHeight;const ctx=canvas.getContext('2d',{willReadFrequently:true});let q=null;
-// First try the full native-resolution frame. Keeping source detail helps small QR codes.
-canvas.width=vw;canvas.height=vh;ctx.drawImage(rear,0,0,vw,vh);q=decodeFrame(ctx,vw,vh);
-// If full-frame decoding fails, scan the central region inside the green guide and enlarge it.
-if(!q){const sx=Math.round(vw*0.12),sy=Math.round(vh*0.22),sw=Math.round(vw*0.76),sh=Math.round(vh*0.52);const scale=Math.min(2,Math.max(1,1000/Math.max(sw,sh)));const cw=Math.round(sw*scale),ch=Math.round(sh*scale);canvas.width=cw;canvas.height=ch;ctx.drawImage(rear,sx,sy,sw,sh,0,0,cw,ch);q=decodeFrame(ctx,cw,ch)}
-// Some phone cameras deliver a soft preview; try a second enlarged central crop.
-if(!q){const sw=Math.round(vw*0.9),sh=Math.round(vh*0.75),sx=Math.round((vw-sw)/2),sy=Math.round((vh-sh)/2);const scale=Math.min(2,Math.max(1,1200/Math.max(sw,sh)));const cw=Math.round(sw*scale),ch=Math.round(sh*scale);canvas.width=cw;canvas.height=ch;ctx.drawImage(rear,sx,sy,sw,sh,0,0,cw,ch);q=decodeFrame(ctx,cw,ch)}
-if(q&&q.data){token=String(q.data).trim();locked=true;stage='found';stopStream('rear');msg.textContent='QR berhasil terbaca otomatis!\nToken berhasil dideteksi. Lanjutkan ke selfie.';document.getElementById('scanFrame').style.display='none';document.getElementById('frontBtn').style.display='block';return}
-}}raf=requestAnimationFrame(scanLoop)}
+async function tryNativeDecode(video){
+  if(!nativeQr) return null;
+  try { const codes=await nativeQr.detect(video); if(codes&&codes.length&&codes[0].rawValue) return {data:codes[0].rawValue}; }
+  catch(e) { /* fallback to jsQR below */ }
+  return null;
+}
+function scanLoop(now){
+ if(stage!=='scan'||locked)return;
+ if(now-lastScan>120&&!decodeBusy){
+  lastScan=now;
+  if(rear.readyState>=2&&rear.videoWidth>0){
+   decodeBusy=true;
+   (async()=>{
+    try{
+     // Prefer the browser's native QR decoder on Android Chrome, then fall back to jsQR.
+     let q=await tryNativeDecode(rear);
+     const vw=rear.videoWidth,vh=rear.videoHeight;
+     if(!q){
+      const ctx=canvas.getContext('2d',{willReadFrequently:true});
+      // Decode full video frame first at native resolution.
+      canvas.width=vw;canvas.height=vh;ctx.drawImage(rear,0,0,vw,vh);q=decodeFrame(ctx,vw,vh);
+      // Try central crop, with modest upscaling to preserve sharpness.
+      if(!q){const sx=Math.round(vw*.08),sy=Math.round(vh*.08),sw=Math.round(vw*.84),sh=Math.round(vh*.84);const scale=Math.min(2.5,Math.max(1,1100/Math.max(sw,sh)));const cw=Math.round(sw*scale),ch=Math.round(sh*scale);canvas.width=cw;canvas.height=ch;ctx.drawImage(rear,sx,sy,sw,sh,0,0,cw,ch);q=decodeFrame(ctx,cw,ch)}
+      // Try several threshold/inversion assumptions via jsQR's attemptBoth setting in decodeFrame.
+      if(!q){const scale=Math.min(1,1000/Math.max(vw,vh));const cw=Math.max(1,Math.round(vw*scale)),ch=Math.max(1,Math.round(vh*scale));canvas.width=cw;canvas.height=ch;ctx.drawImage(rear,0,0,cw,ch);q=decodeFrame(ctx,cw,ch)}
+     }
+     if(q&&q.data){
+      token=String(q.data).trim();locked=true;stage='found';if(raf)cancelAnimationFrame(raf);await stopStream('rear');
+      msg.textContent='QR berhasil terbaca otomatis!\nToken terdeteksi ('+token.length+' karakter). Lanjutkan ke selfie.';
+      document.getElementById('scanFrame').style.display='none';document.getElementById('frontBtn').style.display='block';
+     } else if(!msg.dataset.scantip){
+      msg.textContent='Kamera aktif. QR belum terbaca. Pastikan seluruh QR masuk ke area kamera dan tahan HP stabil sejenak.';
+      msg.dataset.scantip='1';
+     }
+    }catch(e){ /* continue scanning */ }
+    finally{decodeBusy=false;}
+   })();
+  }
+ }
+ raf=requestAnimationFrame(scanLoop);
+}
 async function restartScanner(){locked=false;token='';stage='scan';document.getElementById('frontBtn').style.display='none';document.getElementById('scanFrame').style.display='block';await stopStream('rear');await init()}
 async function startSelfie(){try{document.getElementById('frontBtn').disabled=true;stage='selfie';document.getElementById('selfieBox').style.display='block';await stopStream('rear');frontStream=await openStream('user');front.srcObject=frontStream;await front.play();document.getElementById('selfieMsg').textContent='Kamera depan aktif. Pastikan wajah terlihat jelas.'}catch(e){document.getElementById('selfieMsg').textContent='Kamera depan gagal dibuka. '+errText(e);document.getElementById('frontBtn').disabled=false}}
 async function retakeSelfie(){await stopStream('front');startSelfie()}
