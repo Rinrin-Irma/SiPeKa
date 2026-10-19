@@ -3,22 +3,62 @@
 <style>
 *{box-sizing:border-box}body{font-family:Arial,sans-serif;margin:0;padding:14px;background:#f1f5f9;color:#172033}.wrap{max-width:620px;margin:auto}h1{font-size:24px;color:#0f766e;margin:0 0 8px}.sub{font-size:14px;color:#64748b;line-height:1.5;margin:0 0 14px}.box{background:#fff;border-radius:16px;padding:14px;margin-bottom:12px;box-shadow:0 2px 9px #0f172a0b}.view{position:relative;background:#020617;border-radius:12px;overflow:hidden;min-height:240px}video{display:block;width:100%;height:min(58vh,440px);object-fit:cover;background:#020617}#scanFrame{position:absolute;left:12%;top:22%;width:76%;height:52%;border:3px solid #2dd4bf;border-radius:18px;box-shadow:0 0 0 999px #02061725;pointer-events:none}#scanFrame:after{content:'';position:absolute;left:0;right:0;top:50%;height:2px;background:#2dd4bf;box-shadow:0 0 10px #2dd4bf}.status{font-size:14px;line-height:1.5;margin-top:12px;white-space:pre-wrap;overflow-wrap:anywhere}button{width:100%;padding:14px;border:0;border-radius:11px;background:#0f766e;color:white;font-size:16px;font-weight:bold;margin-top:10px}button.alt{background:#334155}button:disabled{opacity:.5}.small{font-size:12px;color:#64748b;line-height:1.5}#selfieBox{display:none}canvas{display:none}.tag{display:inline-block;background:#ccfbf1;color:#115e59;border-radius:99px;padding:5px 9px;font-size:12px;font-weight:bold;margin-bottom:10px}
 </style><script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script></head>
-<body><div class="wrap"><h1>SiPeKa · Scanner QR Otomatis</h1><p class="sub">Arahkan kamera belakang ke QR siswa. QR dibaca otomatis saat terdeteksi — tidak perlu menekan tombol foto.</p>
+<body><div class="wrap"><h1>SiPeKa · Scanner QR Otomatis</h1><p class="sub">Arahkan kamera belakang ke QR siswa. Pemindai mencoba membaca seluruh gambar dan area tengah secara otomatis — tidak perlu menekan tombol foto.</p>
 <div class="box"><span class="tag">LANGKAH 1 · SCAN OTOMATIS</span><div class="view"><video id="rear" autoplay playsinline muted></video><div id="scanFrame"></div></div><div id="msg" class="status">Meminta akses kamera belakang…</div><button id="restartBtn" class="alt" style="display:none" onclick="restartScanner()">Coba Buka Kamera Lagi</button><button id="frontBtn" style="display:none" onclick="startSelfie()">Lanjut ke Kamera Selfie</button></div>
 <div class="box" id="selfieBox"><span class="tag">LANGKAH 2 · SELFIE</span><p class="sub">QR berhasil dibaca. Arahkan kamera depan ke wajah siswa dan tekan tombol untuk mengambil selfie.</p><div class="view"><video id="front" autoplay playsinline muted></video></div><button id="captureBtn" onclick="captureAndSend()">Ambil Selfie & Kirim ke SiPeKa</button><button class="alt" onclick="retakeSelfie()">Ulangi Selfie</button><div id="selfieMsg" class="status"></div></div>
 <div class="box"><p class="small">Jika izin kamera ditolak, izinkan kamera untuk domain halaman pemindai HTTPS ini di pengaturan situs Chrome. Jangan menutup tab SiPeKa utama.</p></div><canvas id="canvas"></canvas></div>
 <script>
-let rearStream=null,frontStream=null,token='',stage='scan',raf=0,lastScan=0,locked=false;
+let rearStream=null,frontStream=null,token='',stage='scan',raf=0,lastScan=0,locked=false,nativeQr=null,decodeBusy=false;
 const rear=document.getElementById('rear'),front=document.getElementById('front'),canvas=document.getElementById('canvas'),msg=document.getElementById('msg');
 function errText(e){return (e&&e.name||'Error')+': '+(e&&e.message||String(e))}
 async function stopStream(which){const s=which==='rear'?rearStream:frontStream;if(s)s.getTracks().forEach(t=>t.stop());if(which==='rear'){rearStream=null;rear.srcObject=null}else{frontStream=null;front.srcObject=null}}
 async function openStream(facing){const constraints={audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720}}};try{return await navigator.mediaDevices.getUserMedia(constraints)}catch(e){if(facing==='environment'){return await navigator.mediaDevices.getUserMedia({audio:false,video:true})}throw e}}
-async function init(){try{if(!window.isSecureContext)throw new Error('Halaman kamera harus dibuka lewat HTTPS.');if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Browser tidak menyediakan akses kamera langsung.');if(typeof jsQR!=='function')throw new Error('Pustaka scanner QR gagal dimuat. Periksa koneksi internet.');rearStream=await openStream('environment');rear.srcObject=rearStream;await rear.play();msg.textContent='Kamera aktif. Arahkan QR ke kotak hijau; pemindaian berjalan otomatis.';document.getElementById('restartBtn').style.display='none';stage='scan';scanLoop()}catch(e){msg.textContent='Kamera tidak dapat dibuka.\n'+errText(e)+'\n\nPastikan izin kamera untuk halaman HTTPS ini diizinkan.';document.getElementById('restartBtn').style.display='block'}}
-function scanLoop(now){if(stage!=='scan'||locked)return;if(now-lastScan>100){lastScan=now;if(rear.readyState>=2&&rear.videoWidth>0){const vw=rear.videoWidth,vh=rear.videoHeight;const maxW=960,w=Math.min(maxW,vw),h=Math.max(1,Math.round(vh*w/vw));canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(rear,0,0,w,h);try{const image=ctx.getImageData(0,0,w,h);let q=jsQR(image.data,w,h,{inversionAttempts:'attemptBoth'});if(q&&q.data){token=String(q.data).trim();locked=true;stage='found';stopStream('rear');msg.textContent='QR berhasil terbaca otomatis!\nToken berhasil dideteksi. Lanjutkan ke selfie.';document.getElementById('scanFrame').style.display='none';document.getElementById('frontBtn').style.display='block';return}}catch(e){/* frames may occasionally be unreadable; continue scanning */}}}raf=requestAnimationFrame(scanLoop)}
+async function init(){try{if('BarcodeDetector' in window){try{nativeQr=new BarcodeDetector({formats:['qr_code']})}catch(e){nativeQr=null}}if(!window.isSecureContext)throw new Error('Halaman kamera harus dibuka lewat HTTPS.');if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Browser tidak menyediakan akses kamera langsung.');if(typeof jsQR!=='function')throw new Error('Pustaka scanner QR gagal dimuat. Periksa koneksi internet.');rearStream=await openStream('environment');rear.srcObject=rearStream;await rear.play();msg.textContent='Kamera aktif. Arahkan QR ke kotak hijau; pemindaian berjalan otomatis.';document.getElementById('restartBtn').style.display='none';stage='scan';scanLoop()}catch(e){msg.textContent='Kamera tidak dapat dibuka.\n'+errText(e)+'\n\nPastikan izin kamera untuk halaman HTTPS ini diizinkan.';document.getElementById('restartBtn').style.display='block'}}
+function decodeFrame(ctx,w,h){try{const im=ctx.getImageData(0,0,w,h);return jsQR(im.data,w,h,{inversionAttempts:'attemptBoth'})}catch(e){return null}}
+async function tryNativeDecode(video){
+  if(!nativeQr) return null;
+  try { const codes=await nativeQr.detect(video); if(codes&&codes.length&&codes[0].rawValue) return {data:codes[0].rawValue}; }
+  catch(e) { /* fallback to jsQR below */ }
+  return null;
+}
+function scanLoop(now){
+ if(stage!=='scan'||locked)return;
+ if(now-lastScan>120&&!decodeBusy){
+  lastScan=now;
+  if(rear.readyState>=2&&rear.videoWidth>0){
+   decodeBusy=true;
+   (async()=>{
+    try{
+     // Prefer the browser's native QR decoder on Android Chrome, then fall back to jsQR.
+     let q=await tryNativeDecode(rear);
+     const vw=rear.videoWidth,vh=rear.videoHeight;
+     if(!q){
+      const ctx=canvas.getContext('2d',{willReadFrequently:true});
+      // Decode full video frame first at native resolution.
+      canvas.width=vw;canvas.height=vh;ctx.drawImage(rear,0,0,vw,vh);q=decodeFrame(ctx,vw,vh);
+      // Try central crop, with modest upscaling to preserve sharpness.
+      if(!q){const sx=Math.round(vw*.08),sy=Math.round(vh*.08),sw=Math.round(vw*.84),sh=Math.round(vh*.84);const scale=Math.min(2.5,Math.max(1,1100/Math.max(sw,sh)));const cw=Math.round(sw*scale),ch=Math.round(sh*scale);canvas.width=cw;canvas.height=ch;ctx.drawImage(rear,sx,sy,sw,sh,0,0,cw,ch);q=decodeFrame(ctx,cw,ch)}
+      // Try several threshold/inversion assumptions via jsQR's attemptBoth setting in decodeFrame.
+      if(!q){const scale=Math.min(1,1000/Math.max(vw,vh));const cw=Math.max(1,Math.round(vw*scale)),ch=Math.max(1,Math.round(vh*scale));canvas.width=cw;canvas.height=ch;ctx.drawImage(rear,0,0,cw,ch);q=decodeFrame(ctx,cw,ch)}
+     }
+     if(q&&q.data){
+      token=String(q.data).trim();locked=true;stage='found';if(raf)cancelAnimationFrame(raf);await stopStream('rear');
+      msg.textContent='QR berhasil terbaca otomatis!\nToken terdeteksi ('+token.length+' karakter). Lanjutkan ke selfie.';
+      document.getElementById('scanFrame').style.display='none';document.getElementById('frontBtn').style.display='block';
+     } else if(!msg.dataset.scantip){
+      msg.textContent='Kamera aktif. QR belum terbaca. Pastikan seluruh QR masuk ke area kamera dan tahan HP stabil sejenak.';
+      msg.dataset.scantip='1';
+     }
+    }catch(e){ /* continue scanning */ }
+    finally{decodeBusy=false;}
+   })();
+  }
+ }
+ raf=requestAnimationFrame(scanLoop);
+}
 async function restartScanner(){locked=false;token='';stage='scan';document.getElementById('frontBtn').style.display='none';document.getElementById('scanFrame').style.display='block';await stopStream('rear');await init()}
 async function startSelfie(){try{document.getElementById('frontBtn').disabled=true;stage='selfie';document.getElementById('selfieBox').style.display='block';await stopStream('rear');frontStream=await openStream('user');front.srcObject=frontStream;await front.play();document.getElementById('selfieMsg').textContent='Kamera depan aktif. Pastikan wajah terlihat jelas.'}catch(e){document.getElementById('selfieMsg').textContent='Kamera depan gagal dibuka. '+errText(e);document.getElementById('frontBtn').disabled=false}}
 async function retakeSelfie(){await stopStream('front');startSelfie()}
-async function captureAndSend(){if(!token||!frontStream||!front.videoWidth){document.getElementById('selfieMsg').textContent='QR atau kamera selfie belum siap.';return}document.getElementById('captureBtn').disabled=true;const cv=document.createElement('canvas'),scale=Math.min(1,1280/front.videoWidth);cv.width=Math.round(front.videoWidth*scale);cv.height=Math.round(front.videoHeight*scale);cv.getContext('2d').drawImage(front,0,0,cv.width,cv.height);const selfie=cv.toDataURL('image/jpeg',0.72);await stopStream('front');document.getElementById('selfieMsg').textContent='Mengirim token QR dan selfie ke halaman SiPeKa…';const payload={type:'SIPEKA_CAMERA_RESULT',token:token,selfieDataUrl:selfie};if(window.parent&&window.parent!==window){window.parent.postMessage(payload,'*');document.getElementById('selfieMsg').textContent='Data terkirim ke SiPeKa. Tunggu konfirmasi pada halaman utama.';return}if(window.opener){window.opener.postMessage(payload,'*');document.getElementById('selfieMsg').textContent='Data dikirim. Kembali ke tab SiPeKa.';setTimeout(()=>window.close(),900);return}document.getElementById('selfieMsg').textContent='Halaman SiPeKa utama tidak terhubung. Buka pemindai dari tombol di halaman SiPeKa.';document.getElementById('captureBtn').disabled=false}
-
+async function captureAndSend(){if(!token||!frontStream||!front.videoWidth){document.getElementById('selfieMsg').textContent='QR atau kamera selfie belum siap.';return}document.getElementById('captureBtn').disabled=true;const cv=document.createElement('canvas'),scale=Math.min(1,1280/front.videoWidth);cv.width=Math.round(front.videoWidth*scale);cv.height=Math.round(front.videoHeight*scale);cv.getContext('2d').drawImage(front,0,0,cv.width,cv.height);const selfie=cv.toDataURL('image/jpeg',0.78);await stopStream('front');document.getElementById('selfieMsg').textContent='Mengirim token QR dan selfie ke SiPeKa…';if(!window.opener){document.getElementById('selfieMsg').textContent='Tab SiPeKa utama tidak terhubung. Tutup tab ini dan buka kembali dari tombol SiPeKa.';document.getElementById('captureBtn').disabled=false;return}window.opener.postMessage({type:'SIPEKA_CAMERA_RESULT',token:token,selfieDataUrl:selfie},'*');document.getElementById('selfieMsg').textContent='Berhasil dikirim. Kembali ke tab SiPeKa untuk melihat hasil pencatatan.';setTimeout(()=>window.close(),900)}
 window.addEventListener('beforeunload',()=>{if(raf)cancelAnimationFrame(raf);stopStream('rear');stopStream('front')});init();
 </script></body></html>
